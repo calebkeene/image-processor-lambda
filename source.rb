@@ -19,21 +19,19 @@ class ImageProcessorLambda
       @object_info = record.dig('s3', 'object')
 
       # get photo from s3 and save to tmp filesystem for manipulation
-      @base_photo_path = load_file_to_tmp_storage
+      @base_photo_path = download_file
       @new_versions_base_path = '/tmp/processed'
       
-      logger.info("creating directory: #{new_versions_base_path}")
+      puts "creating directory: #{new_versions_base_path}"
       FileUtils.mkpath(new_versions_base_path)
-      logger.info("done!")
 
       @new_version_paths = []
 
       VERSION_NAMES.each_with_index do |version, version_index|
         run_magick(version)
-        logger.info('done!')
 
         processed_photo_path = new_version_paths[version_index]
-        logger.info("processed_photo_path = #{processed_photo_path}")
+        puts "processed_photo_path = #{processed_photo_path}"
 
         upload_to_public_bucket(processed_photo_path)
       end
@@ -45,18 +43,16 @@ class ImageProcessorLambda
     attr_accessor :new_version_paths
 
     def upload_to_public_bucket(photo_path)
-      logger.info("uploading #{photo_path}")
+      puts "uploading #{photo_path}"
 
       destination_bucket_key = filename_from_path(photo_path)
       public_s3_bucket.object(destination_bucket_key).upload_file(photo_path)
-
-      logger.info('done!')
     end
 
     def run_magick(version)
-      logger.info("processing version #{version}")
+      puts "processing version #{version}"
       processed_photo_path = new_version_filepath(version)
-      logger.info("processed_photo_path: #{processed_photo_path}")
+      puts "processed_photo_path: #{processed_photo_path}"
 
       shell_command = %W[
         magick
@@ -68,11 +64,10 @@ class ImageProcessorLambda
 
       run_shell_command(shell_command)
 
-      logger.info('done!')
-      logger.info("checking existance of: #{processed_photo_path}")
+      puts "checking existance of: #{processed_photo_path}"
       
       if File.exist?(processed_photo_path)
-        logger.info('file present!')
+        puts 'file present!'
       else
         logger.error('file missing :<')
       end
@@ -89,7 +84,7 @@ class ImageProcessorLambda
       original_width = run_shell_command(identify_command).chomp.split('x')[0].to_f
 
       resize_percentage = ((400.0 / original_width) * 100).round(4)
-      logger.info("resizing to: #{resize_percentage}%")
+      puts "resizing to: #{resize_percentage}%"
       "#{resize_percentage}%"
     end
 
@@ -98,8 +93,8 @@ class ImageProcessorLambda
         filename_from_path(base_photo_path)
       )
 
-      logger.info("base_filename: #{base_filename}")
-      logger.info("'#{extension}' file detected")
+      puts "base_filename: #{base_filename}"
+      puts "'#{extension}' file detected"
 
       "#{new_versions_base_path}/#{base_filename}-#{version}#{extension}"
     end
@@ -115,20 +110,17 @@ class ImageProcessorLambda
     end
 
     def run_shell_command(command_string)
-      logger.info("running shell command: #{command_string}")
+      puts "running shell command: #{command_string}"
 
       `#{command_string} 2>&1`
     end
 
-    # need to write it to /tmp
-    def load_file_to_tmp_storage
+    def download_file
       filename = object_info['key'].split('/').last
-      logger.info("set filename: #{filename}")
-
       tmp_filepath = "/tmp/#{filename}"
-      logger.info("set tmp_filepath to: #{tmp_filepath}")
 
-      logger.info("downloading object: #{object_info['key']}")
+      puts "downloading #{filename} to #{tmp_filepath}"
+
       File.open(tmp_filepath, 'wb') do |file|
         s3_client.get_object(
           {
@@ -140,9 +132,9 @@ class ImageProcessorLambda
       end
 
       if File.exist?(tmp_filepath)
-        logger.info("file successfully downloaded #{object_info['key']} to #{tmp_filepath}")
+        puts "successful download"
       else
-        logger.error("error downloading #{object_info['key']} from bucket")
+        logger.error("error downloading #{object_info['key']} from private bucket")
       end
 
       tmp_filepath
