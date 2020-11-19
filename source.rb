@@ -12,6 +12,12 @@ class ImageProcessorLambda
   class << self
     VERSION_NAMES = %i[thumbnail medium].freeze
 
+    RATIO_LABELS = {
+      "0.8"  => "portrait",
+      "1.0"  => "square",
+      "1.25" => "landscape"
+    }.freeze
+
     def generate_versions(event:, context:)
       record = event['Records'].first
 
@@ -47,6 +53,10 @@ class ImageProcessorLambda
 
       destination_bucket_key = filename_from_path(photo_path)
       public_s3_bucket.object(destination_bucket_key).upload_file(photo_path)
+
+      puts "finished upload of #{photo_path.split("/").last}, cleaning up tmp file"
+    ensure
+      FileUtils.rm_f(photo_path)
     end
 
     def run_magick(version)
@@ -76,14 +86,17 @@ class ImageProcessorLambda
     end
 
     def resize_dimensions(version)
-      return '50%' if version == :medium
 
+      resize_width = version == :thumbnail ? 400.0 : 800.0
+      
       # thumbnail - ensure 400px wide no matter the height
-      # assumes this always be a shrink resize (source image is always more than 400px wide)
+      # for medium, resize to double this (800px max width)
+      # assumes this always be a shrink resize (source image is always mo re than 800px wide)
+
       identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
       original_width = run_shell_command(identify_command).chomp.split('x')[0].to_f
 
-      resize_percentage = ((400.0 / original_width) * 100).round(4)
+      resize_percentage = ((resize_width / original_width) * 100).round(4)
       puts "resizing to: #{resize_percentage}%"
       "#{resize_percentage}%"
     end
@@ -96,11 +109,27 @@ class ImageProcessorLambda
       puts "base_filename: #{base_filename}"
       puts "'#{extension}' file detected"
 
-      "#{new_versions_base_path}/#{base_filename}-#{version}#{extension}"
+      "#{new_versions_base_path}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
     end
 
     def filename_from_path(photo_path)
       photo_path.split('/').last
+    end
+
+    def ratio_identifier
+      puts "identifying image ratio for #{base_photo_path}..."
+      identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
+
+      width, height = `#{identify_command}`.chomp.split("x").map(&:to_f)
+      puts "width: #{width}, height: #{height}"
+
+      ratio = (width/height).round(2).to_s
+      puts "ratio: #{ratio}\n"
+
+      label = RATIO_LABELS[ratio]
+
+      puts "returning label: #{label}"
+      label
     end
 
     def base_filename_and_extension(filename)
