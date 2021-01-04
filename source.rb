@@ -10,7 +10,12 @@ require 'logger'
 
 class ImageProcessorLambda
   class << self
-    VERSION_NAMES = %i[thumbnail medium].freeze
+    TMP_IMAGES_BASE_PATH = "/tmp/processed"
+
+    # only doing thumbnails for now, but keep the API flexible (may process other versions in the future)
+    RESIZE_VERSIONS = {
+      thumbnail: 400
+    }.freeze
 
     RATIO_LABELS = {
       "0.8"  => "portrait",
@@ -26,41 +31,38 @@ class ImageProcessorLambda
 
       # get photo from s3 and save to tmp filesystem for manipulation
       @base_photo_path = download_file
-      @new_versions_base_path = '/tmp/processed'
       
-      puts "creating directory: #{new_versions_base_path}"
-      FileUtils.mkpath(new_versions_base_path)
-
-      @new_version_paths = []
-
-      VERSION_NAMES.each_with_index do |version, version_index|
-        run_magick(version)
-
-        processed_photo_path = new_version_paths[version_index]
-        puts "processed_photo_path = #{processed_photo_path}"
-
-        upload_to_public_bucket(processed_photo_path)
+      # skip generating the version if the file download somehow failed
+      return if @base_photo_path.nil?
+      
+      puts "creating directory: #{TMP_IMAGE_BASE_PATH}"
+      FileUtils.mkpath(TMP_IMAGE_BASE_PATH)
+      
+      RESIZE_VERSIONS.keys.each do |version|
+        if processed_photo_path = run_magick(version)
+          puts "successfully processed #{processed_photo_path}"
+          upload_to_public_bucket(processed_photo_path)
+        end
       end
     end
 
     private
 
-    attr_reader :base_photo_path, :new_versions_base_path, :bucket_info, :object_info
-    attr_accessor :new_version_paths
+    attr_reader :base_photo_path, :bucket_info, :object_info
 
     def upload_to_public_bucket(photo_path)
-      puts "uploading #{photo_path}"
-
       destination_bucket_key = filename_from_path(photo_path)
+      puts "uploading '#{destination_bucket_key}' to public bucket"
+
       public_s3_bucket.object(destination_bucket_key).upload_file(photo_path)
 
-      puts "finished upload of #{photo_path.split("/").last}, cleaning up tmp file"
+      puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
     ensure
       FileUtils.rm_f(photo_path)
     end
 
     def run_magick(version)
-      puts "processing version #{version}"
+      puts "creating #{version} version"
       processed_photo_path = new_version_filepath(version)
       puts "processed_photo_path: #{processed_photo_path}"
 
@@ -77,24 +79,17 @@ class ImageProcessorLambda
       puts "checking existance of: #{processed_photo_path}"
       
       if File.exist?(processed_photo_path)
-        puts 'file present!'
+        processed_photo_path
       else
-        logger.error('file missing :<')
+        logger.error("ERROR: creating processed version '#{processed_photo_path}' failed, skipping upload to public bucket")
       end
-
-      new_version_paths << processed_photo_path
     end
 
     def resize_dimensions(version)
-
-      resize_width = version == :thumbnail ? 400.0 : 800.0
-      
-      # thumbnail - ensure 400px wide no matter the height
-      # for medium, resize to double this (800px max width)
-      # assumes this always be a shrink resize (source image is always mo re than 800px wide)
-
       identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
       original_width = run_shell_command(identify_command).chomp.split('x')[0].to_f
+
+      resize_width = RESIZE_VERSIONS[version]
 
       resize_percentage = ((resize_width / original_width) * 100).round(4)
       puts "resizing to: #{resize_percentage}%"
@@ -109,7 +104,7 @@ class ImageProcessorLambda
       puts "base_filename: #{base_filename}"
       puts "'#{extension}' file detected"
 
-      "#{new_versions_base_path}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
+      "#{TMP_IMAGE_BASE_PATH}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
     end
 
     def filename_from_path(photo_path)
@@ -162,11 +157,10 @@ class ImageProcessorLambda
 
       if File.exist?(tmp_filepath)
         puts "successful download"
+        tmp_filepath
       else
         logger.error("error downloading #{object_info['key']} from private bucket")
       end
-
-      tmp_filepath
     end
 
     def s3_client
