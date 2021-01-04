@@ -3,14 +3,13 @@
 require 'json'
 require 'fileutils'
 require 'aws-sdk-s3'
-require 'logger'
 
 # ASSUMPTIONS
 # imagemagick binary is loaded in lambda layer
 
 class ImageProcessorLambda
   class << self
-    TMP_IMAGES_BASE_PATH = "/tmp/processed"
+    TMP_IMAGE_BASE_PATH = "/tmp/processed"
 
     # only doing thumbnails for now, but keep the API flexible (may process other versions in the future)
     RESIZE_VERSIONS = {
@@ -30,20 +29,22 @@ class ImageProcessorLambda
       @object_info = record.dig('s3', 'object')
 
       # get photo from s3 and save to tmp filesystem for manipulation
-      @base_photo_path = download_file
+      download_file
+      puts "base_photo_path => #{base_photo_path}"
       
       # skip generating the version if the file download somehow failed
-      return if @base_photo_path.nil?
+      return if base_photo_path.nil?
       
-      puts "creating directory: #{TMP_IMAGE_BASE_PATHS}"
-      FileUtils.mkpath(TMP_IMAGE_BASE_PATHS)
+      puts "creating directory: #{TMP_IMAGE_BASE_PATH}"
+      FileUtils.mkpath(TMP_IMAGE_BASE_PATH)
       
-      RESIZE_VERSIONS.keys do |version|
-        if processed_photo_path = run_magick(version)
-          puts "successfully processed #{processed_photo_path}"
-          upload_to_public_bucket(processed_photo_path)
-        end
+      RESIZE_VERSIONS.keys.each do |version|
+        processed_photo_path = run_magick(version)
+        
+        upload_to_public_bucket(processed_photo_path) if processed_photo_path
       end
+    rescue StandardError => e
+      puts "ERROR: #{e.inspect}"
     end
 
     private
@@ -79,9 +80,10 @@ class ImageProcessorLambda
       puts "checking existance of: #{processed_photo_path}"
       
       if File.exist?(processed_photo_path)
+        puts "successfully processed #{processed_photo_path}"
         processed_photo_path
       else
-        logger.error("ERROR: creating processed version '#{processed_photo_path}' failed, skipping upload to public bucket")
+        puts "ERROR: creating processed version '#{processed_photo_path}' failed, skipping upload to public bucket"
       end
     end
 
@@ -104,7 +106,7 @@ class ImageProcessorLambda
       puts "base_filename: #{base_filename}"
       puts "'#{extension}' file detected"
 
-      "#{TMP_IMAGE_BASE_PATHS}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
+      "#{TMP_IMAGE_BASE_PATH}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
     end
 
     def filename_from_path(photo_path)
@@ -157,9 +159,9 @@ class ImageProcessorLambda
 
       if File.exist?(tmp_filepath)
         puts "successful download"
-        tmp_filepath
+        @base_photo_path = tmp_filepath
       else
-        logger.error("error downloading #{object_info['key']} from private bucket")
+        puts "ERROR: failed to download #{object_info['key']} from private bucket"
       end
     end
 
@@ -173,10 +175,6 @@ class ImageProcessorLambda
 
         s3_resource.bucket('keenedreams-photos-public')
       end
-    end
-
-    def logger
-      @logger ||= Logger.new($stdout)
     end
   end
 end
