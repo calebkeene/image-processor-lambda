@@ -35,10 +35,10 @@ class ImageProcessorLambda
       # skip generating the version if the file download somehow failed
       return if @base_photo_path.nil?
       
-      puts "creating directory: #{TMP_IMAGE_BASE_PATH}"
-      FileUtils.mkpath(TMP_IMAGE_BASE_PATH)
+      puts "creating directory: #{TMP_IMAGE_BASE_PATHS}"
+      FileUtils.mkpath(TMP_IMAGE_BASE_PATHS)
       
-      RESIZE_VERSIONS.keys.each do |version|
+      RESIZE_VERSIONS.keys do |version|
         if processed_photo_path = run_magick(version)
           puts "successfully processed #{processed_photo_path}"
           upload_to_public_bucket(processed_photo_path)
@@ -104,7 +104,7 @@ class ImageProcessorLambda
       puts "base_filename: #{base_filename}"
       puts "'#{extension}' file detected"
 
-      "#{TMP_IMAGE_BASE_PATH}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
+      "#{TMP_IMAGE_BASE_PATHS}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
     end
 
     def filename_from_path(photo_path)
