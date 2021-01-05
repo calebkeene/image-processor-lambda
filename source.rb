@@ -3,6 +3,8 @@
 require 'json'
 require 'fileutils'
 require 'aws-sdk-s3'
+require 'aws-sdk-secretsmanager'
+require 'base64'
 
 # ASSUMPTIONS
 # imagemagick binary is loaded in lambda layer
@@ -163,10 +165,30 @@ class ImageProcessorLambda
       else
         puts "ERROR: failed to download #{object_info['key']} from private bucket"
       end
+    end   
+
+    def keenedreams_api_secret
+      @keenedreams_api_secret ||= begin
+        get_secret_response = secrets_manager_client.get_secret_value(secret_id: "keenedreams_api_client_key")
+        
+        response_string = if get_secret_response.secret_string
+          get_secret_response.secret_string
+        else
+          Base64.decode64(get_secret_response.secret_binary)
+        end
+
+        response_hash = JSON.parse(response_string)
+
+        response_hash["KEENEDREAMS_API_KEY"]
+      end
     end
 
     def s3_client
       @s3_client ||= Aws::S3::Client.new(region: ENV['AWS_REGION'])
+    end
+
+    def secrets_manager_client
+      @secrets_manager_client ||= Aws::SecretsManager::Client.new(region: ENV['AWS_REGION'])
     end
 
     def public_s3_bucket
