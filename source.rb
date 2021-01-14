@@ -3,8 +3,8 @@
 require 'json'
 require 'fileutils'
 require 'aws-sdk-s3'
-require 'aws-sdk-secretsmanager'
 require 'base64'
+require 'net/http'
 
 # ASSUMPTIONS
 # imagemagick binary is loaded in lambda layer
@@ -18,7 +18,7 @@ class ImageProcessorLambda
       thumbnail: 400
     }.freeze
 
-    RATIO_LABELS = {
+    ASPECT_GROUP_MAPPINGS = {
       "0.8"  => "portrait",
       "1.0"  => "square",
       "1.25" => "landscape"
@@ -31,7 +31,7 @@ class ImageProcessorLambda
       @object_info = record.dig('s3', 'object')
 
       # get photo from s3 and save to tmp filesystem for manipulation
-      download_file
+      download_photo
       puts "base_photo_path => #{base_photo_path}"
       
       # skip generating the version if the file download somehow failed
@@ -41,9 +41,13 @@ class ImageProcessorLambda
       FileUtils.mkpath(TMP_IMAGE_BASE_PATH)
       
       RESIZE_VERSIONS.keys.each do |version|
-        processed_photo_path = run_magick(version)
+        @version = version
+        run_magick
         
-        upload_to_public_bucket(processed_photo_path) if processed_photo_path
+        if processed_photo_path
+          upload_to_public_bucket
+          invoke_webhook
+        end
       end
     rescue StandardError => e
       puts "ERROR: #{e.inspect}"
@@ -51,22 +55,50 @@ class ImageProcessorLambda
 
     private
 
-    attr_reader :base_photo_path, :bucket_info, :object_info
+    attr_reader :base_photo_path, :base_filename, :version, :processed_photo_path, :bucket_info, :object_info
 
-    def upload_to_public_bucket(photo_path)
-      destination_bucket_key = filename_from_path(photo_path)
+    def upload_to_public_bucket
+      return unless processed_photo_path
+
+      destination_bucket_key = filename_from_path(processed_photo_path)
       puts "uploading '#{destination_bucket_key}' to public bucket"
 
-      public_s3_bucket.object(destination_bucket_key).upload_file(photo_path)
+      public_s3_bucket.object(destination_bucket_key).upload_file(processed_photo_path)
 
       puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
     ensure
-      FileUtils.rm_f(photo_path)
+      FileUtils.rm_f(processed_photo_path)
     end
 
-    def run_magick(version)
+    def invoke_webhook
+      uri = URI(ENV["KEENEDREAMS_API_URL"])
+      puts "invoking webhook with uri: #{uri}"
+      post_request = Net::HTTP::Post.new(uri)
+
+      post_request.set_form_data({
+        keenedreams_api_client_key: ENV["KEENEDREAMS_API_KEY"],
+        aspect_group: aspect_group,
+        basename: base_filename,
+        version: version
+      })
+
+      response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+        http.request(post_request)
+      end
+
+      case response
+      when Net::HTTPUnauthorized
+        raise "ERROR: keenedreams did not authenticate request"
+      when Net::HTTPCreated
+        puts "POST to #{ENV['KEENEDREAMS_API_URL']} completed successfully"
+      when Net::HTTPInternalServerError
+        raise "ERROR: keenedreams returned a server error"
+      end
+    end
+
+    def run_magick
       puts "creating #{version} version"
-      processed_photo_path = new_version_filepath(version)
+      @processed_photo_path = new_version_filepath
       puts "processed_photo_path: #{processed_photo_path}"
 
       shell_command = %W[
@@ -83,7 +115,6 @@ class ImageProcessorLambda
       
       if File.exist?(processed_photo_path)
         puts "successfully processed #{processed_photo_path}"
-        processed_photo_path
       else
         puts "ERROR: creating processed version '#{processed_photo_path}' failed, skipping upload to public bucket"
       end
@@ -100,35 +131,37 @@ class ImageProcessorLambda
       "#{resize_percentage}%"
     end
 
-    def new_version_filepath(version)
-      base_filename, extension = base_filename_and_extension(
+    def new_version_filepath
+      @base_filename, extension = base_filename_and_extension(
         filename_from_path(base_photo_path)
       )
 
       puts "base_filename: #{base_filename}"
       puts "'#{extension}' file detected"
 
-      "#{TMP_IMAGE_BASE_PATH}/#{base_filename}-#{ratio_identifier}-#{version}#{extension}"
+      "#{TMP_IMAGE_BASE_PATH}/#{base_filename}-#{aspect_group}-#{version}#{extension}"
     end
 
     def filename_from_path(photo_path)
       photo_path.split('/').last
     end
 
-    def ratio_identifier
-      puts "identifying image ratio for #{base_photo_path}..."
-      identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
+    def aspect_group
+      @aspect_group ||= begin
+        puts "identifying image ratio for #{base_photo_path}..."
+        identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
 
-      width, height = `#{identify_command}`.chomp.split("x").map(&:to_f)
-      puts "width: #{width}, height: #{height}"
+        width, height = `#{identify_command}`.chomp.split("x").map(&:to_f)
+        puts "width: #{width}, height: #{height}"
 
-      ratio = (width/height).round(2).to_s
-      puts "ratio: #{ratio}\n"
+        ratio = (width/height).round(2).to_s
+        puts "ratio: #{ratio}\n"
 
-      label = RATIO_LABELS[ratio]
+        group = ASPECT_GROUP_MAPPINGS[ratio]
 
-      puts "returning label: #{label}"
-      label
+        puts "returning aspect group: #{group}"
+        group
+      end
     end
 
     def base_filename_and_extension(filename)
@@ -143,7 +176,7 @@ class ImageProcessorLambda
       `#{command_string} 2>&1`
     end
 
-    def download_file
+    def download_photo
       filename = object_info['key'].split('/').last
       tmp_filepath = "/tmp/#{filename}"
 
@@ -165,30 +198,10 @@ class ImageProcessorLambda
       else
         puts "ERROR: failed to download #{object_info['key']} from private bucket"
       end
-    end   
-
-    def keenedreams_api_secret
-      @keenedreams_api_secret ||= begin
-        get_secret_response = secrets_manager_client.get_secret_value(secret_id: "keenedreams_api_client_key")
-        
-        response_string = if get_secret_response.secret_string
-          get_secret_response.secret_string
-        else
-          Base64.decode64(get_secret_response.secret_binary)
-        end
-
-        response_hash = JSON.parse(response_string)
-
-        response_hash["KEENEDREAMS_API_KEY"]
-      end
     end
 
     def s3_client
       @s3_client ||= Aws::S3::Client.new(region: ENV['AWS_REGION'])
-    end
-
-    def secrets_manager_client
-      @secrets_manager_client ||= Aws::SecretsManager::Client.new(region: ENV['AWS_REGION'])
     end
 
     def public_s3_bucket
