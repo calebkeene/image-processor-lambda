@@ -9,16 +9,16 @@ puts "inspecting photos in #{photos_path}"
 photos = Dir["#{photos_path}/*.jpg"]
 puts "loaded #{photos.count} photos"
 
-version_counts = {
-  "4x5" => 0,
-  "4x4" => 0,
-  "5x4" => 0
+aspect_group_counts = {
+  "portrait" => 0,
+  "square" => 0,
+  "landscape" => 0
 }
 
-ratio_mappings = {
-  "0.8"  => "4x5",
-  "1.0"  => "4x4",
-  "1.25" => "5x4"
+aspect_group_mappings = {
+  "0.8"  => "portrait",
+  "1.0"  => "square",
+  "1.25" => "landscape"
 }
 
 
@@ -30,7 +30,7 @@ photos.each do |photo_path|
   ratio = (width/height).round(2).to_s
   puts "ratio: #{ratio}\n"
 
-  version_key = ratio_mappings[ratio]
+  version_key = aspect_group_mappings[ratio]
 
   if version_key.nil?
     filename = photo_path.split("/").last
@@ -39,8 +39,33 @@ photos.each do |photo_path|
     next
   end
 
-  version_counts[version_key] += 1
+  aspect_group_counts[version_key] += 1
 end
 
+puts "---------------------------------------------"
 puts "finished counting, displaying version counts"
-puts version_counts.inspect
+puts aspect_group_counts.inspect
+puts "---------------------------------------------"
+aspect_group_counts.each do |aspect_group, count|
+  divisability_target = 3
+
+  puts "checking divisability of #{aspect_group}"
+  even_divisions, remainer = count.divmod(divisability_target)
+
+  if remainer == 0
+    puts "#{aspect_group} group evenly divisable by #{divisability_target}"
+  else
+    required_count = even_divisions * divisability_target
+    puts "#{aspect_group} not divisible by #{divisability_target}, delete #{remainer} to have #{required_count} photos."
+
+    next_divisability_target = count
+    
+    while next_divisability_target % 3 != 0
+      next_divisability_target += 1
+    end
+
+    difference = next_divisability_target - count
+    puts "or, you can add #{difference} photos to have #{next_divisability_target}"
+  end
+  puts "---------------------------------------------"
+end
