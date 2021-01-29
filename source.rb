@@ -13,6 +13,10 @@ class ImageProcessorLambda
   class << self
     TMP_IMAGE_BASE_PATH = "/tmp/processed"
 
+    READABLE_ATTRIBUTES = %i(
+      base_photo_path base_filename version processed_photo_path bucket_info object_info
+    ).freeze
+
     # only doing thumbnails for now, but keep the API flexible (may process other versions in the future)
     RESIZE_VERSIONS = {
       thumbnail: 400
@@ -25,6 +29,8 @@ class ImageProcessorLambda
     }.freeze
 
     def generate_versions(event:, context:)
+      reset_instance_variables
+
       record = event['Records'].first
 
       @bucket_info = record.dig('s3', 'bucket')
@@ -55,7 +61,13 @@ class ImageProcessorLambda
 
     private
 
-    attr_reader :base_photo_path, :base_filename, :version, :processed_photo_path, :bucket_info, :object_info
+    attr_reader *READABLE_ATTRIBUTES
+
+    def reset_instance_variables
+      READABLE_ATTRIBUTES.each { |attr_reader_name| instance_variable_set("@#{attr_reader_name}", nil) }
+
+      @aspect_group = nil
+    end
 
     def upload_to_public_bucket
       return unless processed_photo_path
@@ -65,7 +77,11 @@ class ImageProcessorLambda
 
       public_s3_bucket.object(destination_bucket_key).upload_file(processed_photo_path)
 
-      puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
+      if photo_uploaded?(destination_bucket_key, processed_photo_path)
+        puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
+      else
+        raise StandardError, "ERROR: #{destination_bucket_key} not uploaded to public bucket"
+      end
     ensure
       FileUtils.rm_f(processed_photo_path)
     end
@@ -210,6 +226,18 @@ class ImageProcessorLambda
 
         s3_resource.bucket('keenedreams-photos-public')
       end
+    end
+
+    def photo_uploaded?(bucket_key, file_path)
+      object = public_s3_bucket.object(bucket_key)
+      
+      File.open(file_path, 'rb') do |file|
+        object.put(body: file)
+      end
+
+      true
+    rescue StandardError => e
+      false
     end
   end
 end
