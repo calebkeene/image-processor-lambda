@@ -14,7 +14,7 @@ class ImageProcessorLambda
     TMP_IMAGE_BASE_PATH = "/tmp/processed"
 
     READABLE_ATTRIBUTES = %i(
-      base_photo_path base_filename version processed_photo_path bucket_info object_info
+      base_photo_path base_filename version processed_photo_path bucket_info object_info original_width original_height
     ).freeze
 
     # only doing thumbnails for now, but keep the API flexible (may process other versions in the future)
@@ -41,13 +41,18 @@ class ImageProcessorLambda
       puts "base_photo_path => #{base_photo_path}"
       
       # skip generating the version if the file download somehow failed
-      return if base_photo_path.nil?
+      if base_photo_path.nil?
+        puts "failed to load photo (base_photo_path nil) - exiting"
+        return
+      end
       
       puts "creating directory: #{TMP_IMAGE_BASE_PATH}"
       FileUtils.mkpath(TMP_IMAGE_BASE_PATH)
       
       RESIZE_VERSIONS.keys.each do |version|
         @version = version
+
+        original_photo_verbose_metadata # instantiate the instance variable and memoise it
         run_magick
         
         if processed_photo_path
@@ -69,46 +74,25 @@ class ImageProcessorLambda
       @aspect_group = nil
     end
 
-    def upload_to_public_bucket
-      return unless processed_photo_path
+    def original_photo_verbose_metadata
+      @original_photo_verbose_metadata ||= begin
+        identify_output = run_shell_command("magick identify -verbose #{base_photo_path}")
+        metadata_lines  = identify_output.split("\n")
 
-      destination_bucket_key = filename_from_path(processed_photo_path)
-      puts "uploading '#{destination_bucket_key}' to public bucket"
+        # can't parse as YAML directly because it's weirdly fornatted with multiple levels and variable spacing
+        # build a hash from the lines instead
+        metadata_hash = metadata_lines.each_with_object({}) do |line, h|
+          key, value = line.split(": ")
+          key.gsub!(/\s{2,}/, '')
+        
+          h[key] = value
+        end.compact
 
-      public_s3_bucket.object(destination_bucket_key).upload_file(processed_photo_path)
+        @original_width, @original_height = begin
+          metadata_hash["Geometry"].gsub(/\+0/, '').split("x").map(&:to_f)
+        end
 
-      if photo_uploaded?(destination_bucket_key, processed_photo_path)
-        puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
-      else
-        raise StandardError, "ERROR: #{destination_bucket_key} not uploaded to public bucket"
-      end
-    ensure
-      FileUtils.rm_f(processed_photo_path)
-    end
-
-    def invoke_webhook
-      uri = URI(ENV["KEENEDREAMS_API_URL"])
-      puts "invoking webhook with uri: #{uri}"
-      post_request = Net::HTTP::Post.new(uri)
-
-      post_request.set_form_data({
-        keenedreams_api_client_key: ENV["KEENEDREAMS_API_KEY"],
-        aspect_group: aspect_group,
-        basename: base_filename,
-        version: version
-      })
-
-      response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
-        http.request(post_request)
-      end
-
-      case response
-      when Net::HTTPUnauthorized
-        raise "ERROR: keenedreams did not authenticate request"
-      when Net::HTTPCreated
-        puts "POST to #{ENV['KEENEDREAMS_API_URL']} completed successfully"
-      when Net::HTTPInternalServerError
-        raise "ERROR: keenedreams returned a server error"
+        metadata_hash
       end
     end
 
@@ -117,7 +101,7 @@ class ImageProcessorLambda
       @processed_photo_path = new_version_filepath
       puts "processed_photo_path: #{processed_photo_path}"
 
-      shell_command = %W[
+      resize_command = %W[
         magick
         #{base_photo_path}
         -resize
@@ -125,7 +109,7 @@ class ImageProcessorLambda
         #{processed_photo_path}
       ].join(' ')
 
-      run_shell_command(shell_command)
+      run_shell_command(resize_command)
 
       puts "checking existance of: #{processed_photo_path}"
       
@@ -137,9 +121,6 @@ class ImageProcessorLambda
     end
 
     def resize_dimensions(version)
-      identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
-      original_width = run_shell_command(identify_command).chomp.split('x')[0].to_f
-
       resize_width = RESIZE_VERSIONS[version]
 
       resize_percentage = ((resize_width / original_width) * 100).round(4)
@@ -165,12 +146,10 @@ class ImageProcessorLambda
     def aspect_group
       @aspect_group ||= begin
         puts "identifying image ratio for #{base_photo_path}..."
-        identify_command = "magick identify #{base_photo_path} | awk '{print $3}'"
 
-        width, height = `#{identify_command}`.chomp.split("x").map(&:to_f)
-        puts "width: #{width}, height: #{height}"
+        puts "width: #{original_width}, height: #{original_height}"
 
-        ratio = (width/height).round(2).to_s
+        ratio = (original_width/original_height).round(2).to_s
         puts "ratio: #{ratio}\n"
 
         group = ASPECT_GROUP_MAPPINGS[ratio]
@@ -213,6 +192,50 @@ class ImageProcessorLambda
         @base_photo_path = tmp_filepath
       else
         puts "ERROR: failed to download #{object_info['key']} from private bucket"
+      end
+    end
+
+    def upload_to_public_bucket
+      return unless processed_photo_path
+
+      destination_bucket_key = filename_from_path(processed_photo_path)
+      puts "uploading '#{destination_bucket_key}' to public bucket"
+
+      public_s3_bucket.object(destination_bucket_key).upload_file(processed_photo_path)
+
+      if photo_uploaded?(destination_bucket_key, processed_photo_path)
+        puts "finished upload of #{destination_bucket_key}, cleaning up tmp file"
+      else
+        raise StandardError, "ERROR: #{destination_bucket_key} not uploaded to public bucket"
+      end
+    ensure
+      FileUtils.rm_f(processed_photo_path)
+    end
+
+    def invoke_webhook
+      uri = URI(ENV["KEENEDREAMS_API_URL"])
+      puts "invoking webhook with uri: #{uri}"
+      post_request = Net::HTTP::Post.new(uri)
+
+      post_request.set_form_data({
+        keenedreams_api_client_key: ENV["KEENEDREAMS_API_KEY"],
+        version: version,
+        basename: base_filename,
+        aspect_group: aspect_group,
+        verbose_metadata: original_photo_verbose_metadata
+      })
+
+      response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+        http.request(post_request)
+      end
+
+      case response
+      when Net::HTTPUnauthorized
+        raise "ERROR: keenedreams did not authenticate request"
+      when Net::HTTPCreated
+        puts "POST to #{ENV['KEENEDREAMS_API_URL']} completed successfully"
+      when Net::HTTPInternalServerError
+        raise "ERROR: keenedreams returned a server error"
       end
     end
 
