@@ -2,6 +2,7 @@
 
 require 'json'
 require 'fileutils'
+require 'digest'
 require 'aws-sdk-s3'
 require 'base64'
 require 'net/http'
@@ -74,8 +75,17 @@ class ImageProcessorLambda
       @aspect_group = nil
     end
 
+    # use a unique suffix for all memoised instance vars, since multiple lambda function invokations are somehow coming in on the same request (for different files) so need to cache-bust
+    def instance_variable_name(base_name)
+      "@#{base_name}_#{Digest::SHA256.hexdigest(object_info["key"])}"
+    end
+
+    def get_or_set_instance_var(name)
+      instance_variable_get(instance_variable_name(name)) || instance_variable_set(instance_variable_name(name), yield)
+    end
+
     def original_photo_verbose_metadata
-      @original_photo_verbose_metadata ||= begin
+      get_or_set_instance_var(__method__) do
         identify_output = run_shell_command("magick identify -verbose #{base_photo_path}")
         metadata_lines  = identify_output.split("\n")
 
@@ -144,8 +154,11 @@ class ImageProcessorLambda
     end
 
     def aspect_group
-      @aspect_group ||= begin
+      get_or_set_instance_var(__method__) do
         puts "identifying image ratio for #{base_photo_path}..."
+
+        puts "using metadata_hash:"
+        puts original_photo_verbose_metadata.inspect
 
         puts "width: #{original_width}, height: #{original_height}"
 
@@ -172,6 +185,9 @@ class ImageProcessorLambda
     end
 
     def download_photo
+      puts "printing object info: "
+      puts object_info.inspect
+
       filename = object_info['key'].split('/').last
       tmp_filepath = "/tmp/#{filename}"
 
@@ -222,7 +238,7 @@ class ImageProcessorLambda
         version: version,
         basename: base_filename,
         aspect_group: aspect_group,
-        verbose_metadata: original_photo_verbose_metadata
+        verbose_metadata: original_photo_verbose_metadata.to_json
       })
 
       response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
