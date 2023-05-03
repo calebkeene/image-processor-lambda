@@ -20,7 +20,7 @@ class ImageProcessorLambda
 
     # only doing thumbnails for now, but keep the API flexible (may process other versions in the future)
     RESIZE_VERSIONS = {
-      thumbnail: 400
+      thumbnail: 500
     }.freeze
 
     ASPECT_GROUP_MAPPINGS = {
