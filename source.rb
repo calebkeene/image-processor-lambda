@@ -157,8 +157,8 @@ class ImageProcessorLambda
       get_or_set_instance_var(__method__) do
         puts "identifying image ratio for #{base_photo_path}..."
 
-        puts "using metadata_hash:"
-        puts original_photo_verbose_metadata.inspect
+        # puts "using metadata_hash:"
+        # puts original_photo_verbose_metadata.inspect
 
         puts "width: #{original_width}, height: #{original_height}"
 
@@ -238,7 +238,9 @@ class ImageProcessorLambda
         version: version,
         basename: base_filename,
         aspect_group: aspect_group,
-        verbose_metadata: original_photo_verbose_metadata.to_json
+        original_width: original_width,
+        original_height: original_height
+        # verbose_metadata: original_photo_verbose_metadata.to_json
       })
 
       response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
